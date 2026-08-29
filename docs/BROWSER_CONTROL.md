@@ -2,6 +2,10 @@
 
 > How to make an AI agent operate your actual, already-logged-in Chromium browser on Linux Mint — so every site "just works" — instead of a sterile automated browser that Google blocks.
 
+> **Using the Antigravity CLI (`agy`)?** Don't paste a prompt each time — see
+> [ANTIGRAVITY_BROWSER_RULES.md](ANTIGRAVITY_BROWSER_RULES.md) for the rules-file + browser-MCP setup
+> that makes this automatic. This document is the underlying general reference (how/why CDP attach works).
+
 ---
 
 ## 1. Short answer: is Playwright better?
