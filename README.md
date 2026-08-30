@@ -127,9 +127,21 @@ read per-phase timings from run metadata, and run the OPTIMIZE/Z-ORDER measureme
   idempotent** — not end-to-end exactly-once.
 - The Ops Console is a **local** app demonstrating the workflow, not a hosted multi-user service.
 
-## 🛣️ Roadmap (remaining stretch)
-Unity Catalog enforced constraints + data contracts · observability (run-log + alerting) · optional
-DLT/Lakeflow showcase. *(Orchestration and the dashboard are done — see above.)*
+## 🧱 Governance, CI/CD & observability
+- **Unity Catalog governance** ([`notebooks/08_governance.py`](notebooks/08_governance.py)) — table/column
+  comments, **enforced NOT NULL/CHECK** on Silver+Gold, informational PKs, a CHECK-enforcement test, and a
+  generated `data_dictionary`. Frozen contract in [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md).
+- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) — ruff/black + pytest on every push;
+  gated manual Databricks smoke ([`databricks-smoke.yml`](.github/workflows/databricks-smoke.yml) + [`scripts/run_smoke.py`](scripts/run_smoke.py)).
+- **IaC** — Databricks Asset Bundle ([`databricks.yml`](databricks.yml) + [`resources/`](resources/)).
+- **Observability** ([`notebooks/09_observability.py`](notebooks/09_observability.py)) — an `ops_run_log`
+  health table (match/exception rates over time) + `dq_metrics`; free SQL-alert + email hooks. Runbook:
+  [`docs/CICD_OBSERVABILITY.md`](docs/CICD_OBSERVABILITY.md).
+
+## 🛣️ Beyond this build
+Every planned phase (P1–P8) is built and validated end-to-end. Natural next steps: real source CDC
+(Debezium) in place of the synthetic feed · a DLT/Lakeflow showcase · a containerized, authenticated
+hosted deployment of the ops console.
 
 ---
 <div align="center">
