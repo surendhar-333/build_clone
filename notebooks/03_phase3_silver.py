@@ -149,6 +149,34 @@ def build_silver(bronze_table: str, is_network: bool):
     deduped = deduped.select(*cols)
     return deduped, rejects
 
+
+from delta.tables import DeltaTable
+
+
+def merge_silver(clean_df: DataFrame, target_fqn: str) -> None:
+    """Incremental SCD Type 1 upsert into a Change-Data-Feed-enabled Silver table.
+
+    First run creates the table; later runs MERGE by txn_id and UPDATE only when the
+    incoming row is newer (txn_ts guard) so a replayed / out-of-order batch never
+    overwrites fresher state. CDF is enabled so Phase 4 (Gold) can later read changes
+    incrementally. Serverless-safe (no cache/persist).
+    """
+    if not spark.catalog.tableExists(target_fqn):
+        clean_df.write.format("delta").saveAsTable(target_fqn)
+    else:
+        tgt = DeltaTable.forName(spark, target_fqn)
+        (
+            tgt.alias("t")
+            .merge(clean_df.alias("s"), "t.txn_id = s.txn_id")
+            .whenMatchedUpdateAll(condition="s.txn_ts > t.txn_ts OR t.txn_ts IS NULL")
+            .whenNotMatchedInsertAll()
+            .execute()
+        )
+    spark.sql(
+        f"ALTER TABLE {target_fqn} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)"
+    )
+    print(f"{target_fqn}: {spark.table(target_fqn).count()} rows (CDF enabled)")
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -159,13 +187,7 @@ def build_silver(bronze_table: str, is_network: bool):
 
 internal_clean, internal_rejects = build_silver(BRONZE_INTERNAL, is_network=False)
 
-(
-    internal_clean.write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable(SILVER_INTERNAL)
-)
+merge_silver(internal_clean, SILVER_INTERNAL)
 
 (
     internal_rejects.write
@@ -187,13 +209,7 @@ print("Wrote", SILVER_INTERNAL, "and", SILVER_INTERNAL_REJECTS)
 
 network_clean, network_rejects = build_silver(BRONZE_NETWORK, is_network=True)
 
-(
-    network_clean.write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable(SILVER_NETWORK)
-)
+merge_silver(network_clean, SILVER_NETWORK)
 
 (
     network_rejects.write
@@ -204,6 +220,74 @@ network_clean, network_rejects = build_silver(BRONZE_NETWORK, is_network=True)
 )
 
 print("Wrote", SILVER_NETWORK, "and", SILVER_NETWORK_REJECTS)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Data-quality metrics
+# MAGIC Append one internal + one network row per run to `dq_metrics` so quality is trendable over time
+# MAGIC (rows in/clean/rejected + null-status count).
+
+# COMMAND ----------
+
+from datetime import datetime, timezone
+from pyspark.sql.types import (
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+    TimestampType,
+)
+
+DQ_METRICS = f"{CATALOG}.{SCHEMA}.dq_metrics"
+
+spark.sql(
+    f"""
+    CREATE TABLE IF NOT EXISTS {DQ_METRICS} (
+        run_ts            TIMESTAMP,
+        side              STRING,
+        rows_in           BIGINT,
+        rows_clean        BIGINT,
+        rows_rejected     BIGINT,
+        null_status_count BIGINT
+    )
+    USING DELTA
+    """
+)
+
+_DQ_METRICS_SCHEMA = StructType(
+    [
+        StructField("run_ts", TimestampType(), False),
+        StructField("side", StringType(), False),
+        StructField("rows_in", LongType(), False),
+        StructField("rows_clean", LongType(), False),
+        StructField("rows_rejected", LongType(), False),
+        StructField("null_status_count", LongType(), False),
+    ]
+)
+
+
+def _dq_row(side, bronze_table, clean_df, rejects_df, run_ts):
+    """One current-run DQ metrics row (no cache/persist)."""
+    return (
+        run_ts,
+        side,
+        int(spark.table(bronze_table).count()),
+        int(clean_df.count()),
+        int(rejects_df.count()),
+        int(clean_df.filter(F.col("status").isNull()).count()),
+    )
+
+
+run_ts = datetime.now(timezone.utc).replace(tzinfo=None)
+metric_rows = [
+    _dq_row("internal", BRONZE_INTERNAL, internal_clean, internal_rejects, run_ts),
+    _dq_row("network", BRONZE_NETWORK, network_clean, network_rejects, run_ts),
+]
+metrics_df = spark.createDataFrame(metric_rows, schema=_DQ_METRICS_SCHEMA)
+metrics_df.write.format("delta").mode("append").saveAsTable(DQ_METRICS)
+print(f"Appended DQ metrics to {DQ_METRICS}")
+metrics_df.show(truncate=False)
 
 # COMMAND ----------
 
@@ -240,6 +324,32 @@ print("Internal reject reasons:")
 spark.read.table(SILVER_INTERNAL_REJECTS).groupBy("reject_reason").count().show(truncate=False)
 print("Network reject reasons:")
 spark.read.table(SILVER_NETWORK_REJECTS).groupBy("reject_reason").count().show(truncate=False)
+
+# COMMAND ----------
+
+# Machine-readable run summary (CDF flag + counts) for orchestration / observability.
+import json
+
+
+def _cdf_on(fqn: str) -> bool:
+    props = spark.sql(f"SHOW TBLPROPERTIES {fqn}").collect()
+    return any(
+        r[0] == "delta.enableChangeDataFeed" and str(r[1]).lower() == "true"
+        for r in props
+    )
+
+
+dbutils.notebook.exit(
+    json.dumps(
+        {
+            "silver_internal": spark.table(SILVER_INTERNAL).count(),
+            "silver_network": spark.table(SILVER_NETWORK).count(),
+            "cdf_internal": _cdf_on(SILVER_INTERNAL),
+            "cdf_network": _cdf_on(SILVER_NETWORK),
+            "dq_metrics_rows": spark.table(DQ_METRICS).count(),
+        }
+    )
+)
 
 # COMMAND ----------
 
