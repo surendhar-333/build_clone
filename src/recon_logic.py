@@ -34,7 +34,14 @@ def reconcile(internal_df: DataFrame, network_df: DataFrame) -> DataFrame:
     ).otherwise(F.lit(None).cast("double"))
 
     amount_mismatch = present_i & present_n & (F.abs(F.col("i.amount") - F.col("n.amount")) > AMOUNT_TOLERANCE)
-    status_mismatch = present_i & present_n & (F.col("i.status") != F.col("n.status"))
+    # A NULL status on either side must NOT silently classify as MATCHED. Spark's `!=` returns NULL
+    # when either operand is NULL (three-valued logic), which previously fell through to MATCHED.
+    # Treat any null (one-sided or both) OR a genuine difference as a status mismatch -> needs review.
+    status_mismatch = present_i & present_n & (
+        F.col("i.status").isNull()
+        | F.col("n.status").isNull()
+        | (F.col("i.status") != F.col("n.status"))
+    )
 
     match_status = (
         F.when(present_i & ~present_n, F.lit("UNMATCHED_INTERNAL"))
@@ -58,6 +65,27 @@ def reconcile(internal_df: DataFrame, network_df: DataFrame) -> DataFrame:
             network_status.alias("network_status"),
             match_status.alias("match_status"),
         )
+    )
+
+    # Human-readable reason — kept here so the module is the single source of truth for the
+    # Gold notebook (which previously reimplemented this inline) and for analysts/auditors.
+    recon = recon.withColumn(
+        "reason",
+        F.when(F.col("match_status") == "UNMATCHED_INTERNAL",
+               F.lit("Transaction present in internal ledger but missing from network feed"))
+         .when(F.col("match_status") == "UNMATCHED_NETWORK",
+               F.lit("Transaction present in network feed but missing from internal ledger"))
+         .when(F.col("match_status") == "MISMATCH_BOTH",
+               F.concat(F.lit("Amount differs by "), F.col("amount_diff").cast("string"),
+                        F.lit(" and status differs ("), F.col("internal_status"),
+                        F.lit(" vs "), F.col("network_status"), F.lit(")")))
+         .when(F.col("match_status") == "MISMATCH_AMOUNT",
+               F.concat(F.lit("Amount differs by "), F.col("amount_diff").cast("string"),
+                        F.lit(" (tolerance "), F.lit(str(AMOUNT_TOLERANCE)), F.lit(")")))
+         .when(F.col("match_status") == "MISMATCH_STATUS",
+               F.concat(F.lit("Status differs ("), F.col("internal_status"),
+                        F.lit(" vs "), F.col("network_status"), F.lit(")")))
+         .otherwise(F.lit("Amount and status agree within tolerance")),
     )
 
     # Disposition is AUTO when match_status == MISMATCH_AMOUNT and abs(amount_diff) <= AUTO_RESOLVE_TOLERANCE, else MANUAL
