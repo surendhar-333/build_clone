@@ -96,6 +96,17 @@ cd serving && pip install -r requirements.txt && uvicorn app:app --reload
 # http://127.0.0.1:8000  (seeds ~60 sample cases on first run)
 ~~~
 
+A companion **Streamlit dashboard** ([`serving/dashboard_streamlit.py`](serving/dashboard_streamlit.py))
+renders KPIs + charts (exception-type mix, channel exposure, aging trend, disposition & lifecycle) over
+the same DuckDB: `pip install -r serving/requirements-dashboard.txt && streamlit run serving/dashboard_streamlit.py`.
+
+## 🧭 Orchestration
+- **Databricks Workflows Job** ([`jobs/settlement_recon_job.json`](jobs/settlement_recon_job.json)) — the
+  production scheduler: a multi-task DAG (`depends_on` + retries + `max_concurrent_runs=1`, git-sourced).
+  Created and run green end-to-end on serverless.
+- **Local Dagster DAG** ([`orchestration/dagster/`](orchestration/dagster/)) — a standalone orchestrator
+  that triggers the Workflows Job via the Jobs REST API (the Airflow/Dagster keyword; Windows-native, no WSL/Docker).
+
 ## 🧪 Tests & CI
 
 `src/recon_logic.py` is Databricks-independent and unit-tested (six outcomes, the NULL-status regression,
@@ -116,9 +127,9 @@ read per-phase timings from run metadata, and run the OPTIMIZE/Z-ORDER measureme
   idempotent** — not end-to-end exactly-once.
 - The Ops Console is a **local** app demonstrating the workflow, not a hosted multi-user service.
 
-## 🛣️ Roadmap (stretch)
-Unity Catalog enforced constraints + data contracts · real orchestration (Databricks Workflows + a local
-Dagster DAG) · observability (run-log + alerting) · optional DLT/Lakeflow showcase.
+## 🛣️ Roadmap (remaining stretch)
+Unity Catalog enforced constraints + data contracts · observability (run-log + alerting) · optional
+DLT/Lakeflow showcase. *(Orchestration and the dashboard are done — see above.)*
 
 ---
 <div align="center">
