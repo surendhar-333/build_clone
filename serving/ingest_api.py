@@ -107,24 +107,24 @@ MANUAL_TEMPLATE = """
             <input name="business_date" type="date" required>
         </label>
         <label>
+            Channel
+            <input name="channel" required maxlength="128">
+        </label>
+        <label>
             Amount
             <input name="amount" type="number" min="0.01" step="0.01" required>
         </label>
         <label>
             Currency
-            <input name="currency" value="USD" required maxlength="3">
+            <input name="currency" value="INR" required maxlength="3">
         </label>
         <label>
             Status
             <input name="status" required maxlength="128">
         </label>
         <label>
-            Channel
-            <input name="channel" required maxlength="128">
-        </label>
-        <label>
-            Counterparty
-            <input name="counterparty" maxlength="256">
+            Account ID
+            <input name="account_id" required maxlength="256">
         </label>
         <label>
             Transaction timestamp
@@ -151,15 +151,14 @@ form.addEventListener("submit", async (event) => {
         return;
     }
 
-    const counterparty = String(values.get("counterparty") || "").trim();
     const payload = {
         txn_id: String(values.get("txn_id")),
         business_date: String(values.get("business_date")),
+        channel: String(values.get("channel")),
         amount: String(values.get("amount")),
         currency: String(values.get("currency")),
         status: String(values.get("status")),
-        channel: String(values.get("channel")),
-        counterparty: counterparty || null,
+        account_id: String(values.get("account_id")),
         txn_ts: timestamp.toISOString()
     };
 
@@ -217,20 +216,20 @@ class InternalTxn(BaseModel):
 
     txn_id: str
     business_date: date
-    amount: Decimal = Field(gt=0)
-    currency: str = "USD"
-    status: str
     channel: str
-    counterparty: str | None = None
+    amount: Decimal = Field(gt=0)
+    currency: str = "INR"
+    status: str
+    account_id: str
     txn_ts: datetime
 
-    @field_validator("txn_id")
+    @field_validator("txn_id", "account_id")
     @classmethod
-    def validate_txn_id(cls, value: str) -> str:
-        """Reject blank transaction identifiers."""
+    def validate_required_identifier(cls, value: str) -> str:
+        """Reject blank transaction and account identifiers."""
 
         if not value:
-            raise ValueError("txn_id must not be empty")
+            raise ValueError("value must not be empty")
         return value
 
 
@@ -241,17 +240,21 @@ class NetworkTxn(BaseModel):
 
     txn_id: str
     business_date: date
+    channel: str
     amount: Decimal = Field(gt=0)
-    status: str | None = None
+    currency: str = "INR"
+    status: str
+    account_id: str
     txn_ts: datetime
+    network_ref: str
 
-    @field_validator("txn_id")
+    @field_validator("txn_id", "account_id")
     @classmethod
-    def validate_txn_id(cls, value: str) -> str:
-        """Reject blank transaction identifiers."""
+    def validate_required_identifier(cls, value: str) -> str:
+        """Reject blank transaction and account identifiers."""
 
         if not value:
-            raise ValueError("txn_id must not be empty")
+            raise ValueError("value must not be empty")
         return value
 
 
@@ -366,7 +369,7 @@ def canonical_sort_key(transaction: InternalTxn | NetworkTxn) -> tuple[str, ...]
     """Return a deterministic ordering key for transaction CSV rows."""
 
     values = transaction.model_dump(mode="python")
-    return tuple(csv_value(values[name]) for name in transaction.model_fields)
+    return tuple(csv_value(values[name]) for name in type(transaction).model_fields)
 
 
 def build_csv(
@@ -583,13 +586,12 @@ def ingest_network(
     status_code=201,
 )
 def ingest_manual(transaction: InternalTxn) -> ManualIngestResponse:
-    """Land one analyst-entered internal transaction."""
+    """Land one analyst-entered transaction using the internal feed schema."""
 
     settings = settings_or_503()
     content = build_csv(
         [transaction],
         tuple(InternalTxn.model_fields),
-        extra_columns={"source_system": "manual"},
     )
     digest = content_digest(content)
     key = transaction_s3_key(
