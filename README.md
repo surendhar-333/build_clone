@@ -69,6 +69,9 @@ flowchart LR
     class H,I,J o
 ~~~
 
+**Full workflow** — data flow, the exception-case lifecycle state machine, orchestration, the dev/CI
+loop, and the analyst's day (with diagrams): **[`docs/END_TO_END.md`](docs/END_TO_END.md)**.
+
 ## 🚀 Pipeline
 
 | Phase | Notebook | What it does |
