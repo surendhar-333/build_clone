@@ -43,7 +43,9 @@ jobs:
             duckdb \
             jinja2 \
             python-multipart \
-            httpx
+            httpx \
+            boto3 \
+            databricks-sdk
 
       # Lint is informational for now (Databricks notebooks are excluded via pyproject.toml).
       - name: Run Ruff

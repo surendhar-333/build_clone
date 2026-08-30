@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+boto3
+pydantic>=2
+jinja2
+python-multipart

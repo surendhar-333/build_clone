@@ -1,0 +1,70 @@
+name: Sync S3 landing zone to Databricks Volume
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Discover pending objects without uploading them
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: s3-to-databricks-volume-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Sync settlement files
+    # Skips (does not fail) on schedule until the SETTLEMENT_S3_BUCKET repo variable is set.
+    if: ${{ vars.SETTLEMENT_S3_BUCKET != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      AWS_REGION: ap-south-1
+      SETTLEMENT_S3_BUCKET: ${{ vars.SETTLEMENT_S3_BUCKET }}
+      SETTLEMENT_S3_PREFIX: ${{ vars.SETTLEMENT_S3_PREFIX }}
+      VOLUME_PATH: ${{ vars.VOLUME_PATH }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-south-1
+          role-session-name: github-s3-volume-sync
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: serving/requirements-sync.txt
+
+      - name: Install sync dependencies
+        run: python -m pip install -r serving/requirements-sync.txt
+
+      - name: Sync S3 objects to the Databricks Volume
+        shell: bash
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          args=(--once)
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+
+          python serving/s3_to_volume_sync.py "${args[@]}"
