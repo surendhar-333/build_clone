@@ -1,0 +1,53 @@
+resources:
+  jobs:
+    settlement_recon_pipeline:
+      name: settlement_recon_pipeline
+      tags:
+        project: settlement_recon
+        tier: free-edition
+      max_concurrent_runs: 1
+      parameters:
+        - name: rows
+          default: "100000"
+      git_source:
+        git_url: https://github.com/surendhar-333/build
+        git_provider: gitHub
+        git_branch: main
+      queue:
+        enabled: true
+      tasks:
+        - task_key: phase1_generate
+          notebook_task:
+            notebook_path: notebooks/01_phase1_data_generation
+            source: GIT
+            base_parameters:
+              rows: "{{job.parameters.rows}}"
+          max_retries: 1
+          min_retry_interval_millis: 30000
+        - task_key: phase2_bronze
+          depends_on:
+            - task_key: phase1_generate
+          notebook_task:
+            notebook_path: notebooks/02_phase2_bronze_autoloader
+            source: GIT
+          max_retries: 1
+        - task_key: phase3_silver
+          depends_on:
+            - task_key: phase2_bronze
+          notebook_task:
+            notebook_path: notebooks/03_phase3_silver
+            source: GIT
+          max_retries: 1
+        - task_key: phase4_gold
+          depends_on:
+            - task_key: phase3_silver
+          notebook_task:
+            notebook_path: notebooks/04_phase4_gold_reconciliation
+            source: GIT
+          max_retries: 1
+        - task_key: phase5_reports
+          depends_on:
+            - task_key: phase4_gold
+          notebook_task:
+            notebook_path: notebooks/05_phase5_reports
+            source: GIT

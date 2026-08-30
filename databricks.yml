@@ -1,0 +1,16 @@
+bundle:
+  name: settlement_recon
+
+# Databricks Asset Bundle (IaC) for the pipeline. Deploy from a local machine with the modern
+# Databricks CLI (v0.205+):  databricks bundle validate  /  databricks bundle deploy -t dev
+# (In-workspace deploy is blocked by egress on Free Edition, so deploy from local.)
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: ${DATABRICKS_HOST}

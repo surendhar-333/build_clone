@@ -1,0 +1,30 @@
+name: Databricks smoke (manual)
+
+# Gated, manual-only integration smoke test. It runs the real pipeline on Databricks, so it is NOT on
+# push. Bind the `databricks` GitHub Environment to a required reviewer and add the secrets
+# DATABRICKS_HOST + DATABRICKS_TOKEN there. Nothing here echoes the token.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Rows to generate for the smoke run"
+        default: "20000"
+        required: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: databricks
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install --quiet requests
+      - name: Run git-sourced pipeline smoke
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        run: python scripts/run_smoke.py --rows "${{ inputs.rows }}"
