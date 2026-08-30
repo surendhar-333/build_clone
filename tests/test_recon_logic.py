@@ -100,3 +100,72 @@ def test_reconcile_all_cases(spark):
 
     # 8: UNMATCHED_NETWORK
     assert rows["8"].match_status == "UNMATCHED_NETWORK"
+
+
+# --- Regression + contract tests added in P1 ------------------------------------------------------
+
+def _schema_d():
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType
+    return StructType([
+        StructField("txn_id", StringType(), True),
+        StructField("business_date", StringType(), True),
+        StructField("channel", StringType(), True),
+        StructField("amount", DoubleType(), True),
+        StructField("status", StringType(), True),
+    ])
+
+
+def test_null_network_status_is_mismatch_not_matched(spark):
+    """Regression: a NULL status on the network side must classify as MISMATCH_STATUS, not MATCHED.
+
+    Spark's `!=` returns NULL when an operand is NULL (three-valued logic); the old code let that
+    fall through to MATCHED. This pins the isNull-aware fix in recon_logic.reconcile().
+    """
+    schema_d = _schema_d()
+    internal_df = spark.createDataFrame([("1", "2023-01-01", "POS", 100.00, "SETTLED")], schema=schema_d)
+    network_df = spark.createDataFrame([("1", "2023-01-01", "POS", 100.00, None)], schema=schema_d)
+    rows = {r.txn_id: r for r in reconcile(internal_df, network_df).collect()}
+    assert rows["1"].match_status == "MISMATCH_STATUS"
+
+
+def test_both_null_status_is_mismatch(spark):
+    """Both sides NULL status with equal amounts must be needs-review (MISMATCH_STATUS), not MATCHED."""
+    schema_d = _schema_d()
+    internal_df = spark.createDataFrame([("1", "2023-01-01", "POS", 100.00, None)], schema=schema_d)
+    network_df = spark.createDataFrame([("1", "2023-01-01", "POS", 100.00, None)], schema=schema_d)
+    rows = {r.txn_id: r for r in reconcile(internal_df, network_df).collect()}
+    assert rows["1"].match_status == "MISMATCH_STATUS"
+
+
+def test_reason_non_empty_for_exceptions_and_matched(spark):
+    """Every row carries a human-readable reason; matched rows say the sides agree."""
+    schema_d = _schema_d()
+    internal_df = spark.createDataFrame([
+        ("1", "2023-01-01", "POS", 100.00, "SETTLED"),
+        ("2", "2023-01-01", "POS", 105.00, "SETTLED"),
+    ], schema=schema_d)
+    network_df = spark.createDataFrame([
+        ("1", "2023-01-01", "POS", 100.00, "SETTLED"),
+        ("2", "2023-01-01", "POS", 100.00, "SETTLED"),
+    ], schema=schema_d)
+    rows = {r.txn_id: r for r in reconcile(internal_df, network_df).collect()}
+    assert rows["1"].match_status == "MATCHED"
+    assert "agree" in rows["1"].reason.lower()
+    assert rows["2"].match_status == "MISMATCH_AMOUNT"
+    assert rows["2"].reason and len(rows["2"].reason) > 0
+
+
+def test_disposition_auto_vs_manual(spark):
+    """Sub-rupee amount diff auto-resolves; a large diff needs manual review."""
+    schema_d = _schema_d()
+    internal_df = spark.createDataFrame([
+        ("3", "2023-01-01", "POS", 100.50, "SETTLED"),
+        ("4", "2023-01-01", "POS", 105.00, "SETTLED"),
+    ], schema=schema_d)
+    network_df = spark.createDataFrame([
+        ("3", "2023-01-01", "POS", 100.00, "SETTLED"),
+        ("4", "2023-01-01", "POS", 100.00, "SETTLED"),
+    ], schema=schema_d)
+    rows = {r.txn_id: r for r in reconcile(internal_df, network_df).collect()}
+    assert rows["3"].disposition == "AUTO"
+    assert rows["4"].disposition == "MANUAL"
