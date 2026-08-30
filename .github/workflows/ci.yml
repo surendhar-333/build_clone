@@ -37,7 +37,13 @@ jobs:
             pytest \
             chispa \
             ruff \
-            black
+            black \
+            fastapi \
+            "uvicorn[standard]" \
+            duckdb \
+            jinja2 \
+            python-multipart \
+            httpx
 
       # Lint is informational for now (Databricks notebooks are excluded via pyproject.toml).
       - name: Run Ruff
