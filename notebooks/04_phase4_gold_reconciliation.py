@@ -138,51 +138,109 @@ print(f"Wrote {GOLD_RECON}: {spark.table(GOLD_RECON).count()} rows")
 
 # COMMAND ----------
 
-non_matched = spark.table(GOLD_RECON).filter(F.col("match_status") != "MATCHED")
+from delta.tables import DeltaTable
 
-# Deterministic per-date row numbering (ordered by txn_id) for stable-within-a-run case ids
-w = Window.partitionBy("business_date").orderBy("txn_id")
 
-exceptions = (
-    non_matched
-    .withColumn("row_number", F.row_number().over(w))
-    .withColumn(
-        "case_id",
-        F.concat(
-            F.lit("CASE-"),
-            F.col("business_date").cast("string"),
-            F.lit("-"),
-            F.lpad(F.col("row_number").cast("string"), 8, "0"),
-        ),
+def upsert_exception_cases(recon_df, target_fqn: str) -> None:
+    """Upsert reconciliation exceptions with a STABLE identity and a lifecycle.
+
+    case_key = sha2(business_date | txn_id); case_id and first_seen_ts never change after
+    insert. Analyst-managed states (MANUAL_REVIEW/CLOSED) are preserved; only system states
+    (OPEN/AUTO_RESOLVED) are recomputed. Cases absent from the latest reconciliation are kept
+    and transitioned to CLOSED_DISAPPEARED. CDF-enabled. Serverless-safe (no cache).
+    """
+    non_matched = recon_df.filter(F.col("match_status") != "MATCHED")
+
+    case_key = F.sha2(
+        F.concat_ws("|", F.col("business_date").cast("string"), F.col("txn_id")),
+        256,
     )
-    .withColumn("case_type", F.col("match_status"))
-    .withColumn("created_ts", F.current_timestamp())
-    .select(
-        "case_id",
-        "txn_id",
-        "business_date",
-        "channel",
-        "case_type",
-        "internal_amount",
-        "network_amount",
-        "amount_diff",
-        "internal_status",
-        "network_status",
-        "disposition",
-        "reason",
-        "created_ts",
+    case_id = F.concat(
+        F.lit("CASE-"),
+        F.col("business_date").cast("string"),
+        F.lit("-"),
+        F.upper(F.substring(case_key, 1, 12)),
     )
-)
+    incoming_status = F.when(
+        F.col("disposition") == "AUTO", F.lit("AUTO_RESOLVED")
+    ).otherwise(F.lit("OPEN"))
 
-(
-    exceptions.write
-    .format("delta")
-    .mode("overwrite")
-    .option("overwriteSchema", "true")
-    .saveAsTable(GOLD_EXCEPTIONS)
-)
+    incoming = (
+        non_matched.withColumn("case_key", case_key)
+        .withColumn("case_id", case_id)
+        .withColumn("case_type", F.col("match_status"))
+        .withColumn("status", incoming_status)
+        .withColumn("first_seen_ts", F.current_timestamp())
+        .withColumn("last_updated_ts", F.current_timestamp())
+        .select(
+            "case_key", "case_id", "txn_id", "business_date", "channel", "case_type",
+            "internal_amount", "network_amount", "amount_diff", "internal_status",
+            "network_status", "disposition", "reason", "status",
+            "first_seen_ts", "last_updated_ts",
+        )
+    )
 
-print(f"Wrote {GOLD_EXCEPTIONS}: {spark.table(GOLD_EXCEPTIONS).count()} rows")
+    if not spark.catalog.tableExists(target_fqn):
+        incoming.write.format("delta").mode("overwrite").saveAsTable(target_fqn)
+        spark.sql(
+            f"ALTER TABLE {target_fqn} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)"
+        )
+        print(f"Created {target_fqn} with stable case identity + lifecycle (CDF enabled)")
+        return
+
+    spark.sql(
+        f"ALTER TABLE {target_fqn} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)"
+    )
+    target = DeltaTable.forName(spark, target_fqn)
+
+    # Preserve analyst-managed MANUAL_REVIEW/CLOSED; only recompute system OPEN/AUTO_RESOLVED.
+    status_update = (
+        "CASE WHEN t.status IN ('OPEN','AUTO_RESOLVED') THEN "
+        "(CASE WHEN s.disposition = 'AUTO' THEN 'AUTO_RESOLVED' ELSE 'OPEN' END) "
+        "ELSE t.status END"
+    )
+
+    (
+        target.alias("t")
+        .merge(incoming.alias("s"), "t.case_key = s.case_key")
+        .whenMatchedUpdate(
+            set={
+                "case_type": "s.case_type",
+                "internal_amount": "s.internal_amount",
+                "network_amount": "s.network_amount",
+                "amount_diff": "s.amount_diff",
+                "internal_status": "s.internal_status",
+                "network_status": "s.network_status",
+                "reason": "s.reason",
+                "disposition": "s.disposition",
+                "status": status_update,
+                "last_updated_ts": "current_timestamp()",
+            }
+        )
+        .whenNotMatchedInsertAll()
+        .execute()
+    )
+
+    # Cases no longer in the latest recon -> CLOSED_DISAPPEARED (kept, not deleted).
+    incoming_keys = incoming.select("case_key").distinct()
+    (
+        DeltaTable.forName(spark, target_fqn)
+        .alias("t")
+        .merge(incoming_keys.alias("s"), "t.case_key = s.case_key")
+        .whenNotMatchedBySourceUpdate(
+            condition="t.status NOT IN ('CLOSED','CLOSED_DISAPPEARED')",
+            set={
+                "status": "'CLOSED_DISAPPEARED'",
+                "last_updated_ts": "current_timestamp()",
+            },
+        )
+        .execute()
+    )
+    print(f"Upserted active + closed disappeared exception cases in {target_fqn}")
+
+
+upsert_exception_cases(recon, GOLD_EXCEPTIONS)
+print(f"{GOLD_EXCEPTIONS}: {spark.table(GOLD_EXCEPTIONS).count()} rows")
 
 # COMMAND ----------
 
@@ -256,6 +314,15 @@ _disp_counts = {
     r["disposition"]: r["count"]
     for r in spark.table(GOLD_EXCEPTIONS).groupBy("disposition").count().collect()
 }
+_life_counts = {
+    r["status"]: r["count"]
+    for r in spark.table(GOLD_EXCEPTIONS).groupBy("status").count().collect()
+}
+# Deterministic signature of the case_id set — identical across re-runs proves stable identity.
+_sig = spark.sql(
+    f"SELECT sha2(concat_ws(',', sort_array(collect_set(case_id))), 256) AS sig, "
+    f"count(distinct case_id) AS n FROM {GOLD_EXCEPTIONS}"
+).collect()[0]
 
 dbutils.notebook.exit(
     json.dumps(
@@ -264,6 +331,9 @@ dbutils.notebook.exit(
             "exception_rows": spark.table(GOLD_EXCEPTIONS).count(),
             "match_status_counts": _status_counts,
             "disposition_counts": _disp_counts,
+            "lifecycle_counts": _life_counts,
+            "distinct_case_ids": _sig["n"],
+            "case_id_sig": _sig["sig"],
         }
     )
 )
