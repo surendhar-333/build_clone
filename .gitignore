@@ -1,1 +1,5 @@
 __pycache__/
+*.duckdb
+.env
+.venv/
+serving/ops_console.duckdb
