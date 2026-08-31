@@ -103,6 +103,19 @@ A companion **Streamlit dashboard** ([`serving/dashboard_streamlit.py`](serving/
 renders KPIs + charts (exception-type mix, channel exposure, aging trend, disposition & lifecycle) over
 the same DuckDB: `pip install -r serving/requirements-dashboard.txt && streamlit run serving/dashboard_streamlit.py`.
 
+## 📥 Real-source ingestion (S3 → UC Volume → medallion)
+Beyond the synthetic generator, feeds can arrive over an HTTP API or as file drops, land in **Amazon S3**,
+and are relayed into the Unity Catalog Volume that Bronze already reads — so the lakehouse runs on a real
+cloud object-store source. Full runbook: **[`docs/INGESTION.md`](docs/INGESTION.md)**.
+- [`serving/ingest_api.py`](serving/ingest_api.py) — FastAPI: `POST /api/v1/ingest/{internal,network}`,
+  `/api/v1/cases/manual` (+ a `/manual` form) and multipart `/api/v1/ingest/file`; content-hash idempotent
+  S3 keys, env-only credentials, schema matched to the pipeline contract.
+- [`serving/s3_to_volume_sync.py`](serving/s3_to_volume_sync.py) — relays the S3 landing prefix into the
+  managed **UC Volume** (Free Edition can't read external S3 on serverless); append-only/existence-based
+  idempotency, `--once/--loop/--dry-run`. Scheduled via [`.github/workflows/s3-sync.yml`](.github/workflows/s3-sync.yml) using **AWS OIDC**.
+- [`serving/reverse_etl.py`](serving/reverse_etl.py) — **reverse-ETL**: loads Gold exception cases back into
+  the Ops Console's DuckDB so the app serves real pipeline output, not seed samples.
+
 ## 🧭 Orchestration
 - **Databricks Workflows Job** ([`jobs/settlement_recon_job.json`](jobs/settlement_recon_job.json)) — the
   production scheduler: a multi-task DAG (`depends_on` + retries + `max_concurrent_runs=1`, git-sourced).
@@ -124,7 +137,8 @@ See [`docs/SCALE_LAB.md`](docs/SCALE_LAB.md) — run the 01→05 DAG as a git-so
 read per-phase timings from run metadata, and run the OPTIMIZE/Z-ORDER measurement.
 
 ## 🎯 Honest scope
-- Runs on **Databricks (a managed cloud lakehouse platform)** — **not** Azure/AWS/GCP core services.
+- Compute is **Databricks serverless** (a managed lakehouse); ingestion optionally uses **real AWS S3** as
+  the landing zone, relayed into a UC Volume (Free Edition serverless can't read external S3 directly).
 - Change tracking is **Delta Change Data Feed**, not source-database CDC (no Debezium/redo-log).
 - Ingest is exactly-once (Auto Loader checkpoints); the MERGE makes processing **effectively-once /
   idempotent** — not end-to-end exactly-once.
