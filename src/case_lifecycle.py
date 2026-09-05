@@ -1,56 +1,40 @@
-"""Pure-Python reference for exception-case identity and lifecycle rules.
-
-Notebook ``04_phase4_gold_reconciliation.py`` implements the SAME rules in Spark/Delta:
-
-- ``case_key`` = ``F.sha2(concat_ws('|', business_date, txn_id), 256)`` — byte-identical to
-  ``hashlib.sha256(f"{business_date}|{txn_id}").hexdigest()`` here.
-- ``case_id`` = ``'CASE-' + business_date + '-' + upper(case_key[:12])``.
-- the MERGE status-transition ``CASE`` mirrors :func:`next_status`.
-
-Keeping the rules here makes them unit-testable with plain pytest (no Spark/Delta/Java), and documents
-the contract the notebook MERGE must uphold.
-"""
 import hashlib
-
-LIFECYCLE_STATES = {
-    "OPEN",
-    "AUTO_RESOLVED",
-    "MANUAL_REVIEW",
-    "CLOSED",
-    "CLOSED_DISAPPEARED",
-}
-
-# States the system recomputes each run; anything else is analyst-managed and preserved.
-_SYSTEM_STATES = {"OPEN", "AUTO_RESOLVED"}
+from typing import Optional
 
 
 def case_key(business_date: str, txn_id: str) -> str:
-    """Stable exception identity — matches Spark ``sha2(concat_ws('|', business_date, txn_id), 256)``."""
-    return hashlib.sha256(f"{business_date}|{txn_id}".encode("utf-8")).hexdigest()
-
-
-def case_id(business_date: str, key: str) -> str:
-    """Human-readable stable id — matches the notebook's ``CASE-<date>-<upper(first 12 hex)>``."""
-    return f"CASE-{business_date}-{key[:12].upper()}"
-
-
-def next_status(current_status, disposition: str, present_in_recon: bool = True) -> str:
-    """Lifecycle status a case should hold after an upsert (mirrors the notebook MERGE).
-
-    - Not present in the latest recon -> ``CLOSED_DISAPPEARED`` unless already CLOSED/CLOSED_DISAPPEARED
-      (the case row is kept, never deleted).
-    - New case (``current_status`` is None) -> system state from the disposition.
-    - Currently a system state (OPEN/AUTO_RESOLVED) -> recompute from the disposition.
-    - Analyst-managed states (MANUAL_REVIEW, CLOSED) and CLOSED_DISAPPEARED are preserved.
     """
-    system_target = "AUTO_RESOLVED" if disposition == "AUTO" else "OPEN"
+    Returns the SHA256 hex digest of the string `{business_date}|{txn_id}`.
+    """
+    key_str = f"{business_date}|{txn_id}"
+    return hashlib.sha256(key_str.encode("utf-8")).hexdigest()
 
-    if not present_in_recon:
-        if current_status in ("CLOSED", "CLOSED_DISAPPEARED"):
-            return current_status
+
+def case_id(arg1: str, arg2: Optional[str] = None) -> str:
+    """
+    Returns the Case ID format given a case key.
+    Format: 'CASE-' followed by the first 12 characters of the case key in uppercase.
+    Supports either `case_id(case_key)` or `case_id(business_date, case_key)` signatures.
+    """
+    key = arg2 if arg2 is not None else arg1
+    return f"CASE-{key[:12].upper()}"
+
+
+def next_status(current: Optional[str], disposition: str, present_in_latest: bool = True) -> str:
+    """
+    Determine the next status of a case based on its current status, disposition,
+    and whether it is present in the latest reconciliation run.
+    """
+    if not present_in_latest:
+        if current in ("CLOSED", "CLOSED_DISAPPEARED"):
+            return current
         return "CLOSED_DISAPPEARED"
 
-    if current_status is None or current_status in _SYSTEM_STATES:
-        return system_target
+    # State preservation for analyst states
+    if current in ("MANUAL_REVIEW", "CLOSED"):
+        return current
 
-    return current_status
+    # Recompute system states (or initial state)
+    if disposition == "AUTO":
+        return "AUTO_RESOLVED"
+    return "OPEN"
