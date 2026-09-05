@@ -1,5 +1,6 @@
 import os
 import uuid
+import decimal
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -11,8 +12,7 @@ from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import DictLoader, Environment, select_autoescape
 
-
-DUCKDB_PATH = os.getenv("DUCKDB_PATH", "./ops_console.duckdb")
+DUCKDB_PATH = os.getenv("DUCKDB_PATH", "serving/ops_demo.duckdb")
 LOCAL_ACTOR = "local-analyst"
 
 CASE_TYPES = (
@@ -500,8 +500,7 @@ def initialize_database() -> None:
     database_parent.mkdir(parents=True, exist_ok=True)
 
     with database() as connection:
-        connection.execute(
-            """
+        connection.execute("""
             CREATE TABLE IF NOT EXISTS gold_exception_cases (
                 case_key VARCHAR,
                 case_id VARCHAR,
@@ -509,9 +508,9 @@ def initialize_database() -> None:
                 business_date DATE,
                 channel VARCHAR,
                 case_type VARCHAR,
-                internal_amount DOUBLE,
-                network_amount DOUBLE,
-                amount_diff DOUBLE,
+                internal_amount DECIMAL(18,2),
+                network_amount DECIMAL(18,2),
+                amount_diff DECIMAL(18,2),
                 internal_status VARCHAR,
                 network_status VARCHAR,
                 disposition VARCHAR,
@@ -520,18 +519,14 @@ def initialize_database() -> None:
                 first_seen_ts TIMESTAMP,
                 last_updated_ts TIMESTAMP
             )
-            """
-        )
+            """)
 
-        connection.execute(
-            """
+        connection.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_gold_exception_case_id
             ON gold_exception_cases(case_id)
-            """
-        )
+            """)
 
-        connection.execute(
-            """
+        connection.execute("""
             CREATE TABLE IF NOT EXISTS ops_case_actions (
                 action_id VARCHAR,
                 case_id VARCHAR,
@@ -541,11 +536,9 @@ def initialize_database() -> None:
                 idempotency_key VARCHAR UNIQUE,
                 action_ts TIMESTAMP
             )
-            """
-        )
+            """)
 
-        connection.execute(
-            """
+        connection.execute("""
             CREATE TABLE IF NOT EXISTS ops_case_state (
                 case_id VARCHAR PRIMARY KEY,
                 status VARCHAR,
@@ -553,12 +546,11 @@ def initialize_database() -> None:
                 last_actor VARCHAR,
                 updated_ts TIMESTAMP
             )
-            """
-        )
+            """)
 
-        existing_count = connection.execute(
-            "SELECT COUNT(*) FROM gold_exception_cases"
-        ).fetchone()[0]
+        existing_count = connection.execute("SELECT COUNT(*) FROM gold_exception_cases").fetchone()[
+            0
+        ]
 
         if existing_count == 0:
             seed_cases(connection)
@@ -591,13 +583,11 @@ def seed_cases(connection: duckdb.DuckDBPyConnection) -> None:
         case_key = f"SEED-{business_date.isoformat()}-{txn_id}"
         case_id = f"CASE-{business_date.isoformat()}-{sequence:08d}"
 
-        base_amount = round(125.0 + (index * 83.17) % 4800.0, 2)
-        internal_amount: float | None = base_amount
-        network_amount: float | None = base_amount
-        amount_diff: float | None = 0.0
-        internal_status: str | None = ("SETTLED", "PENDING", "FAILED", "REVERSED")[
-            index % 4
-        ]
+        base_amount = decimal.Decimal(f"{125.0 + (index * 83.17) % 4800.0:.2f}")
+        internal_amount: decimal.Decimal | None = base_amount
+        network_amount: decimal.Decimal | None = base_amount
+        amount_diff: decimal.Decimal | None = decimal.Decimal("0.00")
+        internal_status: str | None = ("SETTLED", "PENDING", "FAILED", "REVERSED")[index % 4]
         network_status: str | None = internal_status
         disposition = "MANUAL"
         status = "OPEN"
@@ -605,12 +595,12 @@ def seed_cases(connection: duckdb.DuckDBPyConnection) -> None:
         if case_type == "MISMATCH_AMOUNT":
             # Alternate sub-rupee AUTO cases and larger MANUAL cases.
             if (index // len(CASE_TYPES)) % 2 == 0:
-                amount_diff = 0.50
+                amount_diff = decimal.Decimal("0.50")
                 disposition = "AUTO"
                 status = "AUTO_RESOLVED"
             else:
-                amount_diff = round(2.25 + (index % 9) * 1.35, 2)
-            network_amount = round(base_amount - amount_diff, 2)
+                amount_diff = decimal.Decimal(f"{2.25 + (index % 9) * 1.35:.2f}")
+            network_amount = base_amount - amount_diff
             reason = f"Amount differs by ₹{amount_diff:.2f}"
 
         elif case_type == "MISMATCH_STATUS":
@@ -623,8 +613,8 @@ def seed_cases(connection: duckdb.DuckDBPyConnection) -> None:
             reason = f"Status differs: {internal_status} vs {network_status}"
 
         elif case_type == "MISMATCH_BOTH":
-            amount_diff = round(3.50 + (index % 7) * 2.10, 2)
-            network_amount = round(base_amount - amount_diff, 2)
+            amount_diff = decimal.Decimal(f"{3.50 + (index % 7) * 2.10:.2f}")
+            network_amount = base_amount - amount_diff
             network_status = {
                 "SETTLED": "PENDING",
                 "PENDING": "FAILED",
@@ -646,9 +636,7 @@ def seed_cases(connection: duckdb.DuckDBPyConnection) -> None:
             internal_amount = None
             internal_status = None
             network_amount = base_amount
-            network_status = ("SETTLED", "PENDING", "FAILED", "REVERSED")[
-                (index + 1) % 4
-            ]
+            network_status = ("SETTLED", "PENDING", "FAILED", "REVERSED")[(index + 1) % 4]
             amount_diff = None
             reason = "Transaction exists in the network feed but is missing internally"
 
@@ -737,7 +725,7 @@ EFFECTIVE_CASES_SQL = """
 def get_kpis(connection: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     row = one_as_dict(
         connection,
-        f"""
+        """
         WITH effective AS (
             SELECT
                 COALESCE(s.status, g.status) AS effective_status,
@@ -935,11 +923,7 @@ def record_disposition(
     if len(normalized_note) > 2000:
         raise HTTPException(status_code=400, detail="note must be at most 2000 characters")
 
-    new_status = (
-        "MANUAL_REVIEW"
-        if normalized_action == "escalate"
-        else "CLOSED"
-    )
+    new_status = "MANUAL_REVIEW" if normalized_action == "escalate" else "CLOSED"
     now = datetime.now(timezone.utc).replace(tzinfo=None)
 
     with database() as connection:
