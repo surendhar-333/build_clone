@@ -6,6 +6,7 @@ These exercise the pure DuckDB-side helpers; no Databricks connection or network
 
 from __future__ import annotations
 
+import decimal
 import duckdb
 
 from serving import reverse_etl
@@ -20,9 +21,9 @@ def _sample_row(case_id: str) -> tuple:
         "2026-06-30",
         "POS",
         "MISMATCH_AMOUNT",
-        100.0,
-        99.5,
-        0.5,
+        decimal.Decimal("100.00"),
+        decimal.Decimal("99.50"),
+        decimal.Decimal("0.50"),
         "SETTLED",
         "SETTLED",
         "AUTO",
@@ -61,9 +62,9 @@ def test_load_cases_replaces_without_duplicates() -> None:
     reverse_etl.load_cases(conn, [_sample_row(f"C{i}") for i in range(5)])
     reverse_etl.load_cases(conn, [_sample_row(f"C{i}") for i in range(3)])
     total = conn.execute("SELECT COUNT(*) FROM gold_exception_cases").fetchone()[0]
-    distinct = conn.execute(
-        "SELECT COUNT(DISTINCT case_id) FROM gold_exception_cases"
-    ).fetchone()[0]
+    distinct = conn.execute("SELECT COUNT(DISTINCT case_id) FROM gold_exception_cases").fetchone()[
+        0
+    ]
     assert total == 3
     assert distinct == 3
 
@@ -71,13 +72,9 @@ def test_load_cases_replaces_without_duplicates() -> None:
 def test_load_cases_leaves_ops_case_state_untouched() -> None:
     conn = duckdb.connect(":memory:")
     reverse_etl.ensure_schema(conn)
-    conn.execute(
-        "CREATE TABLE ops_case_state (case_id VARCHAR PRIMARY KEY, status VARCHAR)"
-    )
+    conn.execute("CREATE TABLE ops_case_state (case_id VARCHAR PRIMARY KEY, status VARCHAR)")
     conn.execute("INSERT INTO ops_case_state VALUES ('C0', 'CLOSED')")
     reverse_etl.load_cases(conn, [_sample_row("C0")])
-    row = conn.execute(
-        "SELECT status FROM ops_case_state WHERE case_id = 'C0'"
-    ).fetchone()
+    row = conn.execute("SELECT status FROM ops_case_state WHERE case_id = 'C0'").fetchone()
     assert row is not None
     assert row[0] == "CLOSED"
