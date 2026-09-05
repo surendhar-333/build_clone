@@ -27,22 +27,22 @@
 # COMMAND ----------
 
 # Shared constants (identical across all phase notebooks) -------------------------------------------
-CATALOG = "workspace"            # Free Edition default; if permission error, swap to an existing catalog
-SCHEMA  = "settlement_recon"
-VOLUME  = "landing"
+CATALOG = "workspace"  # Free Edition default; if permission error, swap to an existing catalog
+SCHEMA = "settlement_recon"
+VOLUME = "landing"
 
-VOLUME_ROOT   = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}"
+VOLUME_ROOT = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}"
 INTERNAL_PATH = f"{VOLUME_ROOT}/internal"
-NETWORK_PATH  = f"{VOLUME_ROOT}/network"
+NETWORK_PATH = f"{VOLUME_ROOT}/network"
 
 # Fully-qualified table names (naming contract) ----------------------------------------------------
 BRONZE_INTERNAL = f"{CATALOG}.{SCHEMA}.bronze_internal"
-BRONZE_NETWORK  = f"{CATALOG}.{SCHEMA}.bronze_network"
+BRONZE_NETWORK = f"{CATALOG}.{SCHEMA}.bronze_network"
 
-SILVER_INTERNAL         = f"{CATALOG}.{SCHEMA}.silver_internal"
-SILVER_NETWORK          = f"{CATALOG}.{SCHEMA}.silver_network"
+SILVER_INTERNAL = f"{CATALOG}.{SCHEMA}.silver_internal"
+SILVER_NETWORK = f"{CATALOG}.{SCHEMA}.silver_network"
 SILVER_INTERNAL_REJECTS = f"{CATALOG}.{SCHEMA}.silver_internal_rejects"
-SILVER_NETWORK_REJECTS  = f"{CATALOG}.{SCHEMA}.silver_network_rejects"
+SILVER_NETWORK_REJECTS = f"{CATALOG}.{SCHEMA}.silver_network_rejects"
 
 # Make the active catalog/schema explicit so unqualified references resolve correctly.
 spark.sql(f"USE CATALOG {CATALOG}")
@@ -67,8 +67,16 @@ from pyspark.sql import DataFrame
 
 # Canonical column order for the cleaned Silver output (network adds network_ref) ------------------
 INTERNAL_COLS = [
-    "txn_id", "business_date", "channel", "amount", "currency",
-    "status", "account_id", "txn_ts", "_ingest_ts", "_source_file",
+    "txn_id",
+    "business_date",
+    "channel",
+    "amount",
+    "currency",
+    "status",
+    "account_id",
+    "txn_ts",
+    "_ingest_ts",
+    "_source_file",
 ]
 NETWORK_EXTRA_COLS = ["network_ref"]
 
@@ -83,15 +91,15 @@ def standardize(df: DataFrame, is_network: bool) -> DataFrame:
         df
         # Standardize categorical codes: trim whitespace then upper-case.
         .withColumn("channel", F.upper(F.trim(F.col("channel"))))
-        .withColumn("status",  F.upper(F.trim(F.col("status"))))
+        .withColumn("status", F.upper(F.trim(F.col("status"))))
         .withColumn("currency", F.upper(F.trim(F.col("currency"))))
-        .withColumn("txn_id",     F.trim(F.col("txn_id")))
+        .withColumn("txn_id", F.trim(F.col("txn_id")))
         .withColumn("account_id", F.trim(F.col("account_id")))
         # Type casting per contract.
-        .withColumn("amount",        F.col("amount").cast("decimal(18,2)"))
+        .withColumn("amount", F.col("amount").cast("decimal(18,2)"))
         .withColumn("business_date", F.col("business_date").cast("date"))
-        .withColumn("txn_ts",        F.col("txn_ts").cast("timestamp"))
-        .withColumn("_ingest_ts",    F.col("_ingest_ts").cast("timestamp"))
+        .withColumn("txn_ts", F.col("txn_ts").cast("timestamp"))
+        .withColumn("_ingest_ts", F.col("_ingest_ts").cast("timestamp"))
     )
     if is_network:
         out = out.withColumn("network_ref", F.trim(F.col("network_ref")))
@@ -105,18 +113,18 @@ def split_quality(df: DataFrame):
     Rejects carry a human-readable `reject_reason`. The original (pre-clean) columns are preserved
     so the reject tables remain useful for triage.
     """
-    txn_bad    = F.col("txn_id").isNull() | (F.length(F.col("txn_id")) == 0)
+    txn_bad = F.col("txn_id").isNull() | (F.length(F.col("txn_id")) == 0)
     amount_bad = F.col("amount").isNull() | (F.col("amount") <= 0)
 
     reject_reason = F.concat_ws(
         "; ",
-        F.when(txn_bad,    F.lit("null_or_empty_txn_id")),
-        F.when(amount_bad, F.lit("amount_le_zero_or_null")),
+        F.when(txn_bad, F.lit("MISSING_TXN_ID")),
+        F.when(amount_bad, F.lit("INVALID_AMOUNT")),
     )
 
     is_reject = txn_bad | amount_bad
     rejects = df.filter(is_reject).withColumn("reject_reason", reject_reason)
-    clean   = df.filter(~is_reject)
+    clean = df.filter(~is_reject)
     return clean, rejects
 
 
@@ -125,15 +133,10 @@ def dedupe_latest(df: DataFrame) -> DataFrame:
 
     Nulls sort last so a row with a real timestamp always wins over one without.
     """
-    w = (
-        Window.partitionBy("txn_id")
-        .orderBy(F.col("txn_ts").desc_nulls_last(), F.col("_ingest_ts").desc_nulls_last())
+    w = Window.partitionBy("txn_id").orderBy(
+        F.col("txn_ts").desc_nulls_last(), F.col("_ingest_ts").desc_nulls_last()
     )
-    return (
-        df.withColumn("_rn", F.row_number().over(w))
-        .filter(F.col("_rn") == 1)
-        .drop("_rn")
-    )
+    return df.withColumn("_rn", F.row_number().over(w)).filter(F.col("_rn") == 1).drop("_rn")
 
 
 def build_silver(bronze_table: str, is_network: bool):
@@ -162,7 +165,7 @@ def merge_silver(clean_df: DataFrame, target_fqn: str) -> None:
     incrementally. Serverless-safe (no cache/persist).
     """
     if not spark.catalog.tableExists(target_fqn):
-        clean_df.write.format("delta").saveAsTable(target_fqn)
+        clean_df.write.format("delta").partitionBy("business_date").saveAsTable(target_fqn)
     else:
         tgt = DeltaTable.forName(spark, target_fqn)
         (
@@ -172,10 +175,9 @@ def merge_silver(clean_df: DataFrame, target_fqn: str) -> None:
             .whenNotMatchedInsertAll()
             .execute()
         )
-    spark.sql(
-        f"ALTER TABLE {target_fqn} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)"
-    )
+    spark.sql(f"ALTER TABLE {target_fqn} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
     print(f"{target_fqn}: {spark.table(target_fqn).count()} rows (CDF enabled)")
+
 
 # COMMAND ----------
 
@@ -190,8 +192,7 @@ internal_clean, internal_rejects = build_silver(BRONZE_INTERNAL, is_network=Fals
 merge_silver(internal_clean, SILVER_INTERNAL)
 
 (
-    internal_rejects.write
-    .format("delta")
+    internal_rejects.write.format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
     .saveAsTable(SILVER_INTERNAL_REJECTS)
@@ -212,8 +213,7 @@ network_clean, network_rejects = build_silver(BRONZE_NETWORK, is_network=True)
 merge_silver(network_clean, SILVER_NETWORK)
 
 (
-    network_rejects.write
-    .format("delta")
+    network_rejects.write.format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
     .saveAsTable(SILVER_NETWORK_REJECTS)
@@ -241,8 +241,7 @@ from pyspark.sql.types import (
 
 DQ_METRICS = f"{CATALOG}.{SCHEMA}.dq_metrics"
 
-spark.sql(
-    f"""
+spark.sql(f"""
     CREATE TABLE IF NOT EXISTS {DQ_METRICS} (
         run_ts            TIMESTAMP,
         side              STRING,
@@ -252,8 +251,7 @@ spark.sql(
         null_status_count BIGINT
     )
     USING DELTA
-    """
-)
+    """)
 
 _DQ_METRICS_SCHEMA = StructType(
     [
@@ -298,18 +296,20 @@ metrics_df.show(truncate=False)
 
 # COMMAND ----------
 
+
 def report(side: str, bronze_table: str, silver_table: str, reject_table: str):
-    bronze_cnt  = spark.read.table(bronze_table).count()
-    silver_cnt  = spark.read.table(silver_table).count()
-    reject_cnt  = spark.read.table(reject_table).count()
+    bronze_cnt = spark.read.table(bronze_table).count()
+    silver_cnt = spark.read.table(silver_table).count()
+    reject_cnt = spark.read.table(reject_table).count()
     # Duplicates collapsed = clean-before-dedupe minus distinct kept rows.
     # clean-before-dedupe = bronze - rejects (rejects were removed before dedupe).
     dupes_collapsed = (bronze_cnt - reject_cnt) - silver_cnt
     return (side, bronze_cnt, silver_cnt, reject_cnt, dupes_collapsed)
 
+
 rows = [
     report("internal", BRONZE_INTERNAL, SILVER_INTERNAL, SILVER_INTERNAL_REJECTS),
-    report("network",  BRONZE_NETWORK,  SILVER_NETWORK,  SILVER_NETWORK_REJECTS),
+    report("network", BRONZE_NETWORK, SILVER_NETWORK, SILVER_NETWORK_REJECTS),
 ]
 
 summary = spark.createDataFrame(
@@ -333,10 +333,7 @@ import json
 
 def _cdf_on(fqn: str) -> bool:
     props = spark.sql(f"SHOW TBLPROPERTIES {fqn}").collect()
-    return any(
-        r[0] == "delta.enableChangeDataFeed" and str(r[1]).lower() == "true"
-        for r in props
-    )
+    return any(r[0] == "delta.enableChangeDataFeed" and str(r[1]).lower() == "true" for r in props)
 
 
 dbutils.notebook.exit(
