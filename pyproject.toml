@@ -1,17 +1,18 @@
+[tool.ruff]
+line-length = 100
+extend-exclude = [
+    "notebooks/",
+    "docs/",
+]
+
 [tool.black]
 line-length = 100
 extend-exclude = '''
-/(notebooks|docs|prompts)/
+/(
+    notebooks/
+  | docs/
+)/
 '''
-
-[tool.ruff]
-line-length = 100
-extend-exclude = ["notebooks", "docs", "prompts"]
-
-[tool.ruff.lint]
-select = ["E", "F", "W", "I"]
-ignore = ["E501"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tests"]
