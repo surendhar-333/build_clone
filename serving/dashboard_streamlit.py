@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
+from datetime import datetime, timedelta
 
 import duckdb
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 
@@ -33,194 +35,108 @@ st.set_page_config(
 )
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def table_exists(database_path: str) -> bool:
-    """Return whether the exception read-model table exists."""
-    with duckdb.connect(database_path, read_only=True) as connection:
-        result = connection.execute(
-            """
-            SELECT COUNT(*) > 0 AS table_exists
-            FROM information_schema.tables
-            WHERE table_schema = 'main'
-              AND table_name = 'gold_exception_cases'
-            """
-        ).df()
+def get_dummy_data() -> pd.DataFrame:
+    """Generate fallback dummy data if DuckDB is missing or empty."""
+    today = datetime.now().date()
+    data = []
 
-    return bool(result.iloc[0]["table_exists"])
+    # Generate some dummy records
+    for i in range(1, 101):
+        status = "OPEN" if i % 3 == 0 else ("AUTO_RESOLVED" if i % 2 == 0 else "MANUAL_REVIEW")
+        disposition = (
+            "AUTO"
+            if status == "AUTO_RESOLVED"
+            else ("MANUAL" if status == "MANUAL_REVIEW" else "UNSPECIFIED")
+        )
+        channel = "WEB" if i % 4 == 0 else ("MOBILE" if i % 3 == 0 else "POS")
+        case_type = "AMOUNT_MISMATCH" if i % 5 == 0 else "STATUS_MISMATCH"
+
+        data.append(
+            {
+                "case_id": f"CASE-{i:04d}",
+                "business_date": today - timedelta(days=i % 10),
+                "channel": channel,
+                "case_type": case_type,
+                "internal_amount": 100.0 + i,
+                "network_amount": 100.0 + i + (i % 5),
+                "amount_diff": float(i % 5),
+                "internal_status": "SUCCESS",
+                "network_status": "FAILED",
+                "disposition": disposition,
+                "reason": "Test reason",
+                "status": status,
+                "first_seen_ts": pd.Timestamp.now() - pd.Timedelta(days=i % 10),
+                "last_updated_ts": pd.Timestamp.now(),
+            }
+        )
+
+    return pd.DataFrame(data)[CASE_COLUMNS]
 
 
 @st.cache_data(ttl=30, show_spinner=False)
 def load_cases(database_path: str) -> pd.DataFrame:
-    """Load the offline exception read model from DuckDB."""
-    with duckdb.connect(database_path, read_only=True) as connection:
-        return connection.execute(
-            """
-            SELECT
-                case_id,
-                business_date,
-                channel,
-                case_type,
-                internal_amount,
-                network_amount,
-                amount_diff,
-                internal_status,
-                network_status,
-                disposition,
-                reason,
-                status,
-                first_seen_ts,
-                last_updated_ts
-            FROM gold_exception_cases
-            ORDER BY business_date DESC, first_seen_ts ASC, case_id
-            """
-        ).df()
+    """Load the offline exception read model from DuckDB, with fallback to dummy data."""
+    db_path = Path(database_path).expanduser()
 
+    if not db_path.exists():
+        st.warning(f"DuckDB database not found at `{db_path}`. Using dummy data.")
+        return get_dummy_data()
 
-@st.cache_data(ttl=30, show_spinner=False)
-def load_kpis(database_path: str) -> pd.DataFrame:
-    """Load dashboard KPIs directly from DuckDB."""
-    with duckdb.connect(database_path, read_only=True) as connection:
-        return connection.execute(
-            """
-            SELECT
-                COUNT(*)::BIGINT AS total_cases,
-                COUNT(*) FILTER (
-                    WHERE UPPER(COALESCE(status, '')) = 'OPEN'
-                )::BIGINT AS open_count,
-                COUNT(*) FILTER (
-                    WHERE UPPER(COALESCE(status, '')) = 'AUTO_RESOLVED'
-                )::BIGINT AS auto_resolved_count,
-                COUNT(*) FILTER (
-                    WHERE UPPER(COALESCE(disposition, '')) = 'MANUAL'
-                      AND UPPER(COALESCE(status, 'OPEN'))
-                          IN ('OPEN', 'MANUAL_REVIEW')
-                )::BIGINT AS manual_pending_count,
-                COALESCE(SUM(ABS(amount_diff)), 0.0)::DOUBLE
-                    AS total_abs_amount_diff
-            FROM gold_exception_cases
-            """
-        ).df()
+    try:
+        with duckdb.connect(str(db_path), read_only=True) as connection:
+            # Check if table exists
+            result = connection.execute(
+                """
+                SELECT COUNT(*) > 0 AS table_exists
+                FROM information_schema.tables
+                WHERE table_schema = 'main'
+                  AND table_name = 'gold_exception_cases'
+                """
+            ).df()
 
+            if not bool(result.iloc[0]["table_exists"]):
+                st.warning("Table `gold_exception_cases` not found in DuckDB. Using dummy data.")
+                return get_dummy_data()
 
-@st.cache_data(ttl=30, show_spinner=False)
-def load_case_type_summary(database_path: str) -> pd.DataFrame:
-    """Return case counts grouped by exception type."""
-    with duckdb.connect(database_path, read_only=True) as connection:
-        return connection.execute(
-            """
-            SELECT
-                case_type,
-                COUNT(*)::BIGINT AS case_count
-            FROM gold_exception_cases
-            GROUP BY case_type
-            ORDER BY case_count DESC, case_type
-            """
-        ).df()
+            cases = connection.execute(
+                """
+                SELECT
+                    case_id,
+                    business_date,
+                    channel,
+                    case_type,
+                    internal_amount,
+                    network_amount,
+                    amount_diff,
+                    internal_status,
+                    network_status,
+                    disposition,
+                    reason,
+                    status,
+                    first_seen_ts,
+                    last_updated_ts
+                FROM gold_exception_cases
+                ORDER BY business_date DESC, first_seen_ts ASC, case_id
+                """
+            ).df()
 
+            if cases.empty:
+                st.warning("No data found in DuckDB table. Using dummy data.")
+                return get_dummy_data()
 
-@st.cache_data(ttl=30, show_spinner=False)
-def load_channel_exposure(database_path: str) -> pd.DataFrame:
-    """Return absolute amount difference grouped by payment channel."""
-    with duckdb.connect(database_path, read_only=True) as connection:
-        return connection.execute(
-            """
-            SELECT
-                channel,
-                COALESCE(SUM(ABS(amount_diff)), 0.0)::DOUBLE
-                    AS absolute_amount_difference
-            FROM gold_exception_cases
-            GROUP BY channel
-            ORDER BY absolute_amount_difference DESC, channel
-            """
-        ).df()
+            return cases
 
-
-@st.cache_data(ttl=30, show_spinner=False)
-def load_daily_trend(database_path: str) -> pd.DataFrame:
-    """Return exception volume by business date."""
-    with duckdb.connect(database_path, read_only=True) as connection:
-        return connection.execute(
-            """
-            SELECT
-                business_date,
-                COUNT(*)::BIGINT AS case_count
-            FROM gold_exception_cases
-            GROUP BY business_date
-            ORDER BY business_date
-            """
-        ).df()
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def load_disposition_mix(database_path: str) -> pd.DataFrame:
-    """Return case counts by AUTO/MANUAL disposition."""
-    with duckdb.connect(database_path, read_only=True) as connection:
-        return connection.execute(
-            """
-            SELECT
-                UPPER(COALESCE(disposition, 'UNSPECIFIED')) AS disposition,
-                COUNT(*)::BIGINT AS case_count
-            FROM gold_exception_cases
-            GROUP BY UPPER(COALESCE(disposition, 'UNSPECIFIED'))
-            ORDER BY disposition
-            """
-        ).df()
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def load_status_mix(database_path: str) -> pd.DataFrame:
-    """Return case counts by lifecycle status."""
-    with duckdb.connect(database_path, read_only=True) as connection:
-        return connection.execute(
-            """
-            SELECT
-                UPPER(COALESCE(status, 'UNSPECIFIED')) AS status,
-                COUNT(*)::BIGINT AS case_count
-            FROM gold_exception_cases
-            GROUP BY UPPER(COALESCE(status, 'UNSPECIFIED'))
-            ORDER BY status
-            """
-        ).df()
-
-
-def show_missing_data_warning() -> None:
-    st.warning(
-        "No exception data is available. Run the Payment Exception Ops Console "
-        "first so it can create and seed the DuckDB database, or set "
-        "`DUCKDB_PATH` to an existing DuckDB snapshot containing "
-        "`gold_exception_cases`."
-    )
-    st.stop()
+    except duckdb.Error as error:
+        st.error(f"Unable to read DuckDB at `{db_path}`: {error}. Using dummy data.")
+        return get_dummy_data()
 
 
 st.title("💳 Payment Exception Dashboard")
-st.caption(
-    "Offline operational view of payment reconciliation exceptions stored in local DuckDB."
-)
+st.caption("Offline operational view of payment reconciliation exceptions stored in local DuckDB.")
 
 database_file = Path(DUCKDB_PATH).expanduser()
 
-if not database_file.exists():
-    show_missing_data_warning()
-
-try:
-    if not table_exists(str(database_file)):
-        show_missing_data_warning()
-
-    cases = load_cases(str(database_file))
-
-    if cases.empty:
-        show_missing_data_warning()
-
-    kpis = load_kpis(str(database_file)).iloc[0]
-    case_type_summary = load_case_type_summary(str(database_file))
-    channel_exposure = load_channel_exposure(str(database_file))
-    daily_trend = load_daily_trend(str(database_file))
-    disposition_mix = load_disposition_mix(str(database_file))
-    status_mix = load_status_mix(str(database_file))
-except duckdb.Error as error:
-    st.error(f"Unable to read DuckDB at `{database_file}`: {error}")
-    show_missing_data_warning()
+cases = load_cases(str(database_file))
 
 
 # Sidebar filters -------------------------------------------------------------
@@ -228,12 +144,8 @@ except duckdb.Error as error:
 st.sidebar.header("Case filters")
 st.sidebar.caption(f"DuckDB: `{database_file}`")
 
-available_channels = sorted(
-    value for value in cases["channel"].dropna().unique().tolist()
-)
-available_case_types = sorted(
-    value for value in cases["case_type"].dropna().unique().tolist()
-)
+available_channels = sorted(value for value in cases["channel"].dropna().unique().tolist())
+available_case_types = sorted(value for value in cases["case_type"].dropna().unique().tolist())
 
 selected_channels = st.sidebar.multiselect(
     "Channel",
@@ -252,39 +164,37 @@ selected_case_types = st.sidebar.multiselect(
 filtered_cases = cases.copy()
 
 if selected_channels:
-    filtered_cases = filtered_cases[
-        filtered_cases["channel"].isin(selected_channels)
-    ]
+    filtered_cases = filtered_cases[filtered_cases["channel"].isin(selected_channels)]
 
 if selected_case_types:
-    filtered_cases = filtered_cases[
-        filtered_cases["case_type"].isin(selected_case_types)
-    ]
+    filtered_cases = filtered_cases[filtered_cases["case_type"].isin(selected_case_types)]
 
+# Calculate KPIs from filtered_cases
+total_cases = len(filtered_cases)
+open_cases = len(filtered_cases[filtered_cases["status"].str.upper() == "OPEN"])
+auto_resolved_cases = len(filtered_cases[filtered_cases["status"].str.upper() == "AUTO_RESOLVED"])
+match_rate = (auto_resolved_cases / total_cases * 100) if total_cases > 0 else 0.0
+total_exposure = filtered_cases["amount_diff"].abs().sum()
 
 # KPI row ---------------------------------------------------------------------
 
-kpi_columns = st.columns(5)
+kpi_columns = st.columns(4)
 
 kpi_columns[0].metric(
-    "Total cases",
-    f"{int(kpis['total_cases']):,}",
+    "Total Cases",
+    f"{total_cases:,}",
 )
 kpi_columns[1].metric(
-    "Open",
-    f"{int(kpis['open_count']):,}",
+    "Open Cases",
+    f"{open_cases:,}",
 )
 kpi_columns[2].metric(
-    "Auto resolved",
-    f"{int(kpis['auto_resolved_count']):,}",
+    "Match Rate",
+    f"{match_rate:.1f}%",
 )
 kpi_columns[3].metric(
-    "Manual pending",
-    f"{int(kpis['manual_pending_count']):,}",
-)
-kpi_columns[4].metric(
-    "Total absolute difference",
-    f"₹{float(kpis['total_abs_amount_diff']):,.2f}",
+    "Total Exposure",
+    f"₹{total_exposure:,.2f}",
 )
 
 st.divider()
@@ -296,43 +206,44 @@ left_chart, right_chart = st.columns(2)
 
 with left_chart:
     st.subheader("Cases by exception type")
-    case_type_chart = (
-        case_type_summary.set_index("case_type")[["case_count"]]
-        .sort_values("case_count", ascending=False)
-    )
-    st.bar_chart(
-        case_type_chart,
-        x_label="Case type",
-        y_label="Cases",
-        use_container_width=True,
-    )
+    if not filtered_cases.empty:
+        case_type_counts = filtered_cases["case_type"].value_counts().reset_index()
+        case_type_counts.columns = ["Case type", "Cases"]
+        fig_case_type = px.bar(case_type_counts, x="Case type", y="Cases")
+        st.plotly_chart(fig_case_type, use_container_width=True)
+    else:
+        st.info("No data available for this chart.")
 
 with right_chart:
     st.subheader("Absolute amount difference by channel")
-    channel_chart = (
-        channel_exposure.set_index("channel")[["absolute_amount_difference"]]
-        .sort_values("absolute_amount_difference", ascending=False)
-    )
-    st.bar_chart(
-        channel_chart,
-        x_label="Channel",
-        y_label="Absolute amount difference",
-        use_container_width=True,
-    )
+    if not filtered_cases.empty:
+        channel_exposure = (
+            filtered_cases.groupby("channel")["amount_diff"]
+            .apply(lambda x: x.abs().sum())
+            .reset_index()
+        )
+        channel_exposure.columns = ["Channel", "Absolute amount difference"]
+        channel_exposure = channel_exposure.sort_values(
+            "Absolute amount difference", ascending=False
+        )
+        fig_channel = px.bar(channel_exposure, x="Channel", y="Absolute amount difference")
+        st.plotly_chart(fig_channel, use_container_width=True)
+    else:
+        st.info("No data available for this chart.")
 
 st.subheader("Exception aging trend by business date")
-daily_trend["business_date"] = pd.to_datetime(daily_trend["business_date"])
-daily_chart = (
-    daily_trend.sort_values("business_date")
-    .set_index("business_date")[["case_count"]]
-)
-st.area_chart(
-    daily_chart,
-    x_label="Business date",
-    y_label="Cases",
-    use_container_width=True,
-)
-
+if not filtered_cases.empty:
+    daily_trend = (
+        filtered_cases.groupby(pd.to_datetime(filtered_cases["business_date"]).dt.date)
+        .size()
+        .reset_index(name="Cases")
+    )
+    daily_trend.columns = ["Business date", "Cases"]
+    daily_trend = daily_trend.sort_values("Business date")
+    fig_daily = px.area(daily_trend, x="Business date", y="Cases")
+    st.plotly_chart(fig_daily, use_container_width=True)
+else:
+    st.info("No data available for this chart.")
 
 # Disposition and lifecycle mix -----------------------------------------------
 
@@ -340,23 +251,31 @@ disposition_column, lifecycle_column = st.columns(2)
 
 with disposition_column:
     st.subheader("Disposition mix")
-    disposition_chart = disposition_mix.set_index("disposition")[["case_count"]]
-    st.bar_chart(
-        disposition_chart,
-        x_label="Disposition",
-        y_label="Cases",
-        use_container_width=True,
-    )
+    if not filtered_cases.empty:
+        disposition_counts = (
+            filtered_cases["disposition"]
+            .fillna("UNSPECIFIED")
+            .str.upper()
+            .value_counts()
+            .reset_index()
+        )
+        disposition_counts.columns = ["Disposition", "Cases"]
+        fig_disp = px.bar(disposition_counts, x="Disposition", y="Cases")
+        st.plotly_chart(fig_disp, use_container_width=True)
+    else:
+        st.info("No data available for this chart.")
 
 with lifecycle_column:
     st.subheader("Lifecycle status mix")
-    lifecycle_chart = status_mix.set_index("status")[["case_count"]]
-    st.bar_chart(
-        lifecycle_chart,
-        x_label="Lifecycle status",
-        y_label="Cases",
-        use_container_width=True,
-    )
+    if not filtered_cases.empty:
+        status_counts = (
+            filtered_cases["status"].fillna("UNSPECIFIED").str.upper().value_counts().reset_index()
+        )
+        status_counts.columns = ["Lifecycle status", "Cases"]
+        fig_status = px.bar(status_counts, x="Lifecycle status", y="Cases")
+        st.plotly_chart(fig_status, use_container_width=True)
+    else:
+        st.info("No data available for this chart.")
 
 st.divider()
 
@@ -365,8 +284,7 @@ st.divider()
 
 st.subheader("Exception cases")
 st.caption(
-    f"Showing {len(filtered_cases):,} of {len(cases):,} cases. "
-    "Sidebar filters apply to this table."
+    f"Showing {len(filtered_cases):,} of {len(cases):,} cases. Sidebar filters apply to this table."
 )
 
 display_columns = [
@@ -386,20 +304,17 @@ display_columns = [
     "reason",
 ]
 
-display_cases = filtered_cases[display_columns].copy()
-display_cases["business_date"] = pd.to_datetime(
-    display_cases["business_date"]
-).dt.date
-display_cases["first_seen_ts"] = pd.to_datetime(
-    display_cases["first_seen_ts"]
-)
-display_cases["last_updated_ts"] = pd.to_datetime(
-    display_cases["last_updated_ts"]
-)
+if not filtered_cases.empty:
+    display_cases = filtered_cases[display_columns].copy()
+    display_cases["business_date"] = pd.to_datetime(display_cases["business_date"]).dt.date
+    display_cases["first_seen_ts"] = pd.to_datetime(display_cases["first_seen_ts"])
+    display_cases["last_updated_ts"] = pd.to_datetime(display_cases["last_updated_ts"])
+else:
+    display_cases = pd.DataFrame(columns=display_columns)
 
 st.dataframe(
     display_cases,
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
     column_config={
         "case_id": st.column_config.TextColumn("Case ID"),
