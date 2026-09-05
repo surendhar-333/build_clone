@@ -96,9 +96,7 @@ def get_gold_table() -> str:
     """Return and validate the configured Databricks Gold table name."""
     table = os.getenv("GOLD_TABLE", DEFAULT_GOLD_TABLE).strip()
     if not _GOLD_TABLE_PATTERN.fullmatch(table):
-        raise ValueError(
-            "GOLD_TABLE must be an unquoted one-, two-, or three-part SQL identifier"
-        )
+        raise ValueError("GOLD_TABLE must be an unquoted one-, two-, or three-part SQL identifier")
     return table
 
 
@@ -136,9 +134,9 @@ def ensure_schema(duck_conn: DuckDBConnection) -> None:
             business_date DATE,
             channel VARCHAR,
             case_type VARCHAR,
-            internal_amount DOUBLE,
-            network_amount DOUBLE,
-            amount_diff DOUBLE,
+            internal_amount DECIMAL(18,2),
+            network_amount DECIMAL(18,2),
+            amount_diff DECIMAL(18,2),
             internal_status VARCHAR,
             network_status VARCHAR,
             disposition VARCHAR,
@@ -170,10 +168,7 @@ def load_cases(
 
     for row_number, row in enumerate(materialized_rows, start=1):
         if len(row) != len(COLUMNS):
-            raise ValueError(
-                f"Row {row_number} has {len(row)} values; "
-                f"expected {len(COLUMNS)}"
-            )
+            raise ValueError(f"Row {row_number} has {len(row)} values; expected {len(COLUMNS)}")
 
     duck_conn.execute("BEGIN TRANSACTION")
     try:
@@ -214,10 +209,7 @@ def fetch_cases(databricks_conn: DatabricksConnection) -> list[tuple[Any, ...]]:
 def build_parser() -> argparse.ArgumentParser:
     """Build the reverse-ETL command-line argument parser."""
     parser = argparse.ArgumentParser(
-        description=(
-            "Copy Databricks Gold settlement exception cases into the "
-            "Ops Console DuckDB."
-        )
+        description=("Copy Databricks Gold settlement exception cases into the Ops Console DuckDB.")
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
